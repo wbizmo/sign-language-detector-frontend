@@ -15,6 +15,12 @@ test("treats CONNECTING and OPEN as an existing connection attempt", () => {
   assert.equal(hasActiveConnectionAttempt(null), false);
 });
 
+test("one disconnected start request progresses through connect, wait, then start", () => {
+  assert.equal(getStreamingStartAction(null), "connect");
+  assert.equal(getStreamingStartAction(WS_STATE.CONNECTING), "wait");
+  assert.equal(getStreamingStartAction(WS_STATE.OPEN), "start");
+});
+
 test("starts immediately only for an open socket", () => {
   assert.equal(getStreamingStartAction(WS_STATE.OPEN), "start");
 });
