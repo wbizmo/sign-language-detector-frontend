@@ -22,10 +22,10 @@ export function parseChatSseLine(line: string): ChatSseEvent {
   if (!data || typeof data !== "object") return { kind: "ignore" };
   const event = data as Record<string, unknown>;
 
-  if (event.done === true) return { kind: "done" };
   if (typeof event.error === "string" && event.error.trim()) {
-    return { kind: "error", error: event.error };
+    return { kind: "error", error: event.error.trim() };
   }
+  if (event.done === true) return { kind: "done" };
   if (typeof event.token === "string" && event.token.length > 0) {
     return { kind: "token", token: event.token };
   }
