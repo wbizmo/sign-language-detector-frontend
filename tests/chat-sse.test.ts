@@ -30,3 +30,10 @@ test("ignores unrelated and empty events", () => {
   assert.deepEqual(parseChatSseLine("event: ping"), { kind: "ignore" });
   assert.deepEqual(parseChatSseLine("data: {}"), { kind: "ignore" });
 });
+
+test("server errors take precedence over completion flags", () => {
+  assert.deepEqual(
+    parseChatSseLine('data: {"done":true,"error":"provider down"}'),
+    { kind: "error", error: "provider down" },
+  );
+});
