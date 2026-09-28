@@ -5,8 +5,11 @@ import {
     UseSignLanguageStreamReturn,
     FrameData,
     GlossPrediction,
-    WebSocketMessage,
 } from "@/types/sign-language";
+import {
+    getStreamingStartAction,
+    hasActiveConnectionAttempt,
+} from "@/lib/websocket-lifecycle";
 
 /**
  * Hook to manage WebSocket connection to FastAPI backend
@@ -25,48 +28,62 @@ export function useSignLanguageStream(
     const [sessionId] = useState(() => generateSessionId());
 
     const wsRef = useRef<WebSocket | null>(null);
+    const pendingStartRef = useRef(false);
     const reconnectTimeoutRef = useRef<NodeJS.Timeout>(undefined);
     const reconnectAttemptsRef = useRef(0);
     const maxReconnectAttempts = 5;
 
     const connect = useCallback(() => {
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-            console.log("WebSocket already connected");
+        const existingReadyState = wsRef.current?.readyState ?? null;
+        if (hasActiveConnectionAttempt(existingReadyState)) {
+            console.log(
+                existingReadyState === WebSocket.OPEN
+                    ? "WebSocket already connected"
+                    : "WebSocket connection already in progress"
+            );
             return;
+        }
+
+        if (reconnectTimeoutRef.current) {
+            clearTimeout(reconnectTimeoutRef.current);
+            reconnectTimeoutRef.current = undefined;
         }
 
         try {
             const ws = new WebSocket(`${backendUrl}/ws/stream/${sessionId}`);
+            wsRef.current = ws;
 
             ws.onopen = () => {
+                if (wsRef.current !== ws) {
+                    ws.close(1000, "Superseded connection");
+                    return;
+                }
+
                 console.log("✅ WebSocket OPENED successfully:", sessionId);
-                // console.log("✅ WebSocket readyState:", ws.readyState);
-                // console.log("✅ WebSocket URL:", ws.url);
                 setIsConnected(true);
                 setError(null);
                 reconnectAttemptsRef.current = 0;
+
+                if (pendingStartRef.current) {
+                    pendingStartRef.current = false;
+                    setIsStreaming(true);
+                }
             };
 
             ws.onmessage = (event) => {
+                if (wsRef.current !== ws) return;
+
                 console.log("🔔 ============ ONMESSAGE FIRED ============");
-                // console.log("🔔 Event object:", event);
-                // console.log("🔔 Event.data type:", typeof event.data);
-                // console.log("🔔 Event.data:", event.data);
 
                 try {
-                    // console.log("📨 Raw WebSocket message received:", event.data);
                     const message = JSON.parse(event.data);
-                    // console.log("📦 Parsed message:", message);
 
-                    // Check if it's a wrapped message with type field
                     if (message.type) {
                         switch (message.type) {
                             case "prediction":
                                 if (message.data && typeof message.data === "object") {
                                     const prediction = message.data as GlossPrediction;
-                                    // console.log("🎯 Prediction extracted (wrapped):", prediction);
                                     setLastPrediction(prediction);
-                                    // console.log("📞 Calling onPrediction callback with:", prediction);
                                     onPrediction?.(prediction);
                                 }
                                 break;
@@ -88,16 +105,11 @@ export function useSignLanguageStream(
                                 console.log("⚠️ Unknown message type:", message);
                                 console.log("Full message object:", JSON.stringify(message, null, 2));
                         }
-                    }
-                    // Handle unwrapped prediction (direct format from backend)
-                    else if (message.gloss && typeof message.confidence === "number") {
+                    } else if (message.gloss && typeof message.confidence === "number") {
                         const prediction = message as GlossPrediction;
-                        // console.log("🎯 Prediction extracted (unwrapped):", prediction);
                         setLastPrediction(prediction);
-                        // console.log("📞 Calling onPrediction callback with:", prediction);
                         onPrediction?.(prediction);
-                    }
-                    else {
+                    } else {
                         console.log("⚠️ Unknown message format:", JSON.stringify(message, null, 2));
                     }
                 } catch (err) {
@@ -107,20 +119,21 @@ export function useSignLanguageStream(
             };
 
             ws.onerror = (event) => {
+                if (wsRef.current !== ws) return;
+
                 console.error("❌ WebSocket ERROR event:", event);
                 console.error("❌ WebSocket readyState:", ws.readyState);
                 setError("WebSocket connection error");
             };
 
             ws.onclose = (event) => {
+                if (wsRef.current !== ws) return;
+
                 console.log("🔴 WebSocket CLOSED");
-                // console.log("🔴 Close code:", event.code);
-                // console.log("🔴 Close reason:", event.reason);
-                // console.log("🔴 Was clean:", event.wasClean);
+                wsRef.current = null;
                 setIsConnected(false);
                 setIsStreaming(false);
 
-                // Attempt to reconnect if not a normal closure
                 if (
                     event.code !== 1000 &&
                     reconnectAttemptsRef.current < maxReconnectAttempts
@@ -132,12 +145,11 @@ export function useSignLanguageStream(
                     );
 
                     reconnectTimeoutRef.current = setTimeout(() => {
+                        reconnectTimeoutRef.current = undefined;
                         connect();
                     }, delay);
                 }
             };
-
-            wsRef.current = ws;
         } catch (err: any) {
             console.error("Failed to create WebSocket:", err);
             setError(err.message);
@@ -145,13 +157,18 @@ export function useSignLanguageStream(
     }, [backendUrl, sessionId, onPrediction]);
 
     const disconnect = useCallback(() => {
+        pendingStartRef.current = false;
+        reconnectAttemptsRef.current = 0;
+
         if (reconnectTimeoutRef.current) {
             clearTimeout(reconnectTimeoutRef.current);
+            reconnectTimeoutRef.current = undefined;
         }
 
-        if (wsRef.current) {
-            wsRef.current.close(1000, "Client disconnect");
-            wsRef.current = null;
+        const ws = wsRef.current;
+        wsRef.current = null;
+        if (ws) {
+            ws.close(1000, "Client disconnect");
         }
 
         setIsConnected(false);
@@ -186,19 +203,28 @@ export function useSignLanguageStream(
     );
 
     const startStreaming = useCallback(() => {
-        if (!isConnected) {
-            setError("Not connected to WebSocket");
+        const action = getStreamingStartAction(wsRef.current?.readyState ?? null);
+
+        if (action === "start") {
+            pendingStartRef.current = false;
+            setIsStreaming(true);
+            setError(null);
             return;
         }
-        setIsStreaming(true);
+
+        pendingStartRef.current = true;
         setError(null);
-    }, [isConnected]);
+
+        if (action === "connect") {
+            connect();
+        }
+    }, [connect]);
 
     const stopStreaming = useCallback(() => {
+        pendingStartRef.current = false;
         setIsStreaming(false);
     }, []);
 
-    // Cleanup on unmount
     useEffect(() => {
         return () => {
             disconnect();
@@ -219,7 +245,6 @@ export function useSignLanguageStream(
     } as UseSignLanguageStreamReturn & { sendFrames: (frames: string[]) => boolean };
 }
 
-// Helper function to generate unique session ID
 function generateSessionId(): string {
     return `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 }
